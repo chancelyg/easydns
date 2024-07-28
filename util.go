@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/miekg/dns"
 )
 
@@ -15,4 +17,13 @@ func extractIPAddresses(msg *dns.Msg) []string {
 		}
 	}
 	return ips
+}
+
+func getTLD(domain string) string {
+	parts := strings.Split(domain, ".")
+	if len(parts) < 2 {
+		return domain // 如果域名中没有点，返回原始域名
+	}
+	// 返回最后两个部分作为顶级域名
+	return parts[len(parts)-2] + "." + parts[len(parts)-1]
 }

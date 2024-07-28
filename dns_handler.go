@@ -43,7 +43,8 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	var cache *lru.Cache
 	var cacheDuration time.Duration
 
-	if _, exists := config.DomainList[requestedDomain]; exists {
+	ltdDoamin := getTLD(requestedDomain)
+	if _, exists := config.DomainList[ltdDoamin]; exists {
 		upstream = config.UpstreamDomesticDNS
 		cache = config.CacheDomestic
 		cacheDuration = 5 * time.Minute
