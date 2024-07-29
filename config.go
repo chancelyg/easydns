@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 type Config struct {
@@ -20,6 +20,8 @@ type Config struct {
 	CacheDomestic       *lru.Cache
 	CacheOverseas       *lru.Cache
 	HostsMap            map[string][]string
+	IPV4                bool
+	IPV6                bool
 }
 
 var config *Config
@@ -28,16 +30,13 @@ func (c *Config) Initialize() {
 	var err error
 	c.CacheDomestic, err = InitializeCache(c.CacheLimit)
 	if err != nil {
-		logrus.Fatalf("Failed to create domestic cache: %v", err)
+		log.WithFields(log.Fields{"err": err}).Fatal("Failed to create domestic cache")
 	}
 
 	c.CacheOverseas, err = InitializeCache(c.CacheLimit)
 	if err != nil {
-		logrus.Fatalf("Failed to create overseas cache: %v", err)
+		log.WithFields(log.Fields{"err": err}).Fatal("Failed to create overseas cache")
 	}
-
-	logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
-	logrus.SetLevel(logrus.InfoLevel)
 
 	c.DomainList = loadDomesticDomains(c.DomesticFilePath)
 	c.HostsMap = parseHostsFile(c.HostsFilePath)
@@ -47,7 +46,7 @@ func loadDomesticDomains(filename string) map[string]struct{} {
 	domainList := make(map[string]struct{})
 	file, err := os.Open(filename)
 	if err != nil {
-		logrus.Fatalf("Failed to open %s file: %v", filename, err)
+		log.WithFields(log.Fields{"err": err, "filename": filename}).Fatal("Failed to open file")
 	}
 	defer file.Close()
 
@@ -57,7 +56,7 @@ func loadDomesticDomains(filename string) map[string]struct{} {
 	}
 
 	if err := scanner.Err(); err != nil {
-		logrus.Fatalf("Error reading domain list file: %v", err)
+		log.WithFields(log.Fields{"err": err, "filename": filename}).Fatal("Error reading domain list file")
 	}
 
 	return domainList

@@ -12,6 +12,7 @@ curl -s "$URL" | while read -r line; do
     if [[ $line =~ ^server=/(.*)/.*$ ]]; then
         DOMAIN="${BASH_REMATCH[1]}"
         echo "$DOMAIN" >> "$OUTPUT_FILE"
+        echo "$DOMAIN has been added."
     fi
 done
 

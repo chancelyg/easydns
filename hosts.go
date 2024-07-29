@@ -5,14 +5,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 func parseHostsFile(filePath string) map[string][]string {
 	hosts := make(map[string][]string)
 	file, err := os.Open(filePath)
 	if err != nil {
-		logrus.Errorf("Error opening /etc/hosts file: %v", err)
+		log.WithFields(log.Fields{"err": err, "filePath": filePath}).Error("can't open file")
 		return hosts
 	}
 	defer file.Close()
@@ -34,7 +34,7 @@ func parseHostsFile(filePath string) map[string][]string {
 	}
 
 	if err := scanner.Err(); err != nil {
-		logrus.Errorf("Error reading /etc/hosts file: %v", err)
+		log.WithFields(log.Fields{"err": err, "filePath": filePath}).Error("can't load file")
 	}
 
 	return hosts

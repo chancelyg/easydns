@@ -7,13 +7,31 @@ import (
 
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/miekg/dns"
-	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	clientIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 	requestedDomain := strings.TrimSuffix(r.Question[0].Name, ".")
 	requestType := dns.TypeToString[r.Question[0].Qtype]
+
+	// 不允许解析 IPV6
+	if !config.IPV6 && requestType == "AAAA" {
+		nxdomainResponse := new(dns.Msg)
+		nxdomainResponse.SetReply(r)
+		nxdomainResponse.Rcode = dns.RcodeNotImplemented
+		w.WriteMsg(nxdomainResponse)
+		return
+	}
+
+	// 不允许解析 IPV4
+	if !config.IPV4 && requestType == "A" {
+		nxdomainResponse := new(dns.Msg)
+		nxdomainResponse.SetReply(r)
+		nxdomainResponse.Rcode = dns.RcodeNotImplemented
+		w.WriteMsg(nxdomainResponse)
+		return
+	}
 
 	// 检查 /etc/hosts
 	if ips, exists := config.HostsMap[requestedDomain]; exists {
@@ -33,7 +51,7 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 			}
 		}
 		if len(response.Answer) > 0 {
-			logrus.Infof("Client IP: %s, Domain: %s, Upstream DNS: /etc/hosts, Type: %s, IPs: %v", clientIP, requestedDomain, requestType, ips)
+			log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "requestType": requestType, "ips": ips}).Info(("query success by hosts file"))
 			w.WriteMsg(response)
 			return
 		}
@@ -57,7 +75,7 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	if cachedResponse, found := cache.Get(requestedDomain); found {
 		cachedMsg := cachedResponse.(*dns.Msg)
 		ips := extractIPAddresses(cachedMsg)
-		logrus.Infof("Client IP: %s, Domain: %s, Upstream DNS: %s, Type: %s, Cache Duration: %s, IPs: %v", clientIP, requestedDomain, upstream, requestType, cacheDuration.String(), ips)
+		log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "requestType": requestType, "ips": ips, "upstream": upstream, "cacheDuration": cacheDuration.String()}).Info(("query success by cache"))
 		cachedMsg.Id = r.Id
 		w.WriteMsg(cachedMsg)
 		return
@@ -66,7 +84,7 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	response, err := forwardDNSQuery(r, upstream)
 	if err != nil {
 		dns.HandleFailed(w, r)
-		logrus.Errorf("Client %s requested %s, failed to get response from %s", clientIP, requestedDomain, upstream)
+		log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "upstream": upstream}).Error("failed to get response")
 		return
 	}
 
@@ -75,7 +93,7 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	})
 
 	ips := extractIPAddresses(response)
-	logrus.Infof("Client IP: %s, Domain: %s, Upstream DNS: %s, Type: %s, Cache Duration: %s, IPs: %v", clientIP, requestedDomain, upstream, requestType, cacheDuration.String(), ips)
+	log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "requestType": requestType, "ips": ips, "upstream": upstream, "cacheDuration": cacheDuration.String()}).Info(("query success by cache"))
 	if len(ips) > 0 {
 		cache.Add(requestedDomain, response)
 	}
@@ -86,7 +104,7 @@ func forwardDNSQuery(query *dns.Msg, server string) (*dns.Msg, error) {
 	client := new(dns.Client)
 	response, _, err := client.Exchange(query, server)
 	if err != nil {
-		logrus.Errorf("Failed to forward query to %s: %s", server, err)
+		log.WithFields(log.Fields{"server": server, "err": err}).Error("Failed to forward query")
 		return nil, err
 	}
 	return response, nil
