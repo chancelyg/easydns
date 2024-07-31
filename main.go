@@ -35,6 +35,7 @@ func main() {
 	flagHosts := flag.String("hosts", "/etc/hosts", "path to hosts file")
 	flagIPV4 := flag.Bool("ipv4", true, "enable IPV4 resolution(default true)")
 	flagIPV6 := flag.Bool("ipv6", false, "enable IPV6 resolution(default false)")
+	flagUPDSize := flag.Uint("udpsize", 512, "enable IPV6 resolution(default false)")
 
 	if *flagH {
 		flag.Usage()
@@ -57,6 +58,7 @@ func main() {
 		Port:                *port,
 		IPV4:                *flagIPV4,
 		IPV6:                *flagIPV6,
+		UDPSize:             uint16(*flagUPDSize),
 	}
 
 	config.Initialize()

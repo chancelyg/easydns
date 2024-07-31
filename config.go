@@ -22,6 +22,7 @@ type Config struct {
 	HostsMap            map[string][]string
 	IPV4                bool
 	IPV6                bool
+	UDPSize             uint16
 }
 
 var config *Config

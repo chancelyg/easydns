@@ -101,7 +101,9 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func forwardDNSQuery(query *dns.Msg, server string) (*dns.Msg, error) {
-	client := new(dns.Client)
+	client := &dns.Client{
+		UDPSize: uint16(config.UDPSize), // 增加缓冲区大小
+	}
 	response, _, err := client.Exchange(query, server)
 	if err != nil {
 		log.WithFields(log.Fields{"server": server, "err": err}).Error("Failed to forward query")
