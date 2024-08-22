@@ -67,13 +67,13 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 	ltdDoamin := getTLD(requestedDomain)
 	if _, exists := config.DomainList[ltdDoamin]; exists {
-		upstream = config.PrimaryDNS
-		cache = config.CachePrimaryDNS
-		cacheDuration = 5 * time.Minute
-	} else {
 		upstream = config.MinorDNS
 		cache = config.CacheMinorDNS
 		cacheDuration = 6 * time.Hour
+	} else {
+		upstream = config.PrimaryDNS
+		cache = config.CachePrimaryDNS
+		cacheDuration = 5 * time.Minute
 	}
 
 	cacheID := fmt.Sprintf("%s-%s", requestType, requestedDomain)
