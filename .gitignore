@@ -23,4 +23,4 @@ go.work.sum
 
 dist
 .vscode
-domestic-domain.txt
+domain.txt

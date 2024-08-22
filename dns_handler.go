@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -52,7 +53,10 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		if len(response.Answer) > 0 {
 			log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "requestType": requestType, "ips": ips}).Info(("query success by hosts file"))
-			w.WriteMsg(response)
+			nxdomainResponse := new(dns.Msg)
+			nxdomainResponse.SetReply(r)
+			nxdomainResponse.Rcode = dns.RcodeNotImplemented
+			w.WriteMsg(nxdomainResponse)
 			return
 		}
 	}
@@ -63,19 +67,26 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 	ltdDoamin := getTLD(requestedDomain)
 	if _, exists := config.DomainList[ltdDoamin]; exists {
-		upstream = config.UpstreamDomesticDNS
-		cache = config.CacheDomestic
+		upstream = config.PrimaryDNS
+		cache = config.CachePrimaryDNS
 		cacheDuration = 5 * time.Minute
 	} else {
-		upstream = config.UpstreamOverseasDNS
-		cache = config.CacheOverseas
+		upstream = config.MinorDNS
+		cache = config.CacheMinorDNS
 		cacheDuration = 6 * time.Hour
 	}
 
-	if cachedResponse, found := cache.Get(requestedDomain); found {
+	cacheID := fmt.Sprintf("%s-%s", requestType, requestedDomain)
+	if cachedResponse, found := cache.Get(cacheID); found {
 		cachedMsg := cachedResponse.(*dns.Msg)
 		ips := extractIPAddresses(cachedMsg)
-		log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "requestType": requestType, "ips": ips, "upstream": upstream, "cacheDuration": cacheDuration.String()}).Info(("query success by cache"))
+		log.WithFields(log.Fields{"clientIP": clientIP,
+			"cacheID":         cacheID,
+			"requestedDomain": requestedDomain,
+			"requestType":     requestType,
+			"ips":             ips,
+			"upstream":        upstream,
+			"cacheDuration":   cacheDuration.String()}).Info(("query success by cache"))
 		cachedMsg.Id = r.Id
 		w.WriteMsg(cachedMsg)
 		return
@@ -89,13 +100,18 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	time.AfterFunc(cacheDuration, func() {
-		cache.Remove(requestedDomain)
+		cache.Remove(cacheID)
 	})
 
 	ips := extractIPAddresses(response)
-	log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "requestType": requestType, "ips": ips, "upstream": upstream, "cacheDuration": cacheDuration.String()}).Info(("query success by cache"))
+	log.WithFields(log.Fields{"clientIP": clientIP,
+		"requestedDomain": requestedDomain,
+		"requestType":     requestType,
+		"ips":             ips,
+		"upstream":        upstream,
+		"cacheDuration":   cacheDuration.String()}).Info(("query success by dns server"))
 	if len(ips) > 0 {
-		cache.Add(requestedDomain, response)
+		cache.Add(cacheID, response)
 	}
 	w.WriteMsg(response)
 }
