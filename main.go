@@ -30,7 +30,7 @@ func main() {
 	flagD := flag.String("d", "domain.txt", "domain list file path")
 	flagL := flag.Int("l", 4096, "cache limit")
 	printVersion := flag.Bool("V", false, "Show version")
-	port := flag.Int("p", 53, "service listen port")
+	port := flag.Int("port", 53, "service listen port")
 
 	flagHosts := flag.String("hosts", "/etc/hosts", "path to hosts file")
 	flagIPV4 := flag.Bool("ipv4", true, "enable IPV4 resolution(default true)")
