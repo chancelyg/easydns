@@ -19,11 +19,25 @@ func extractIPAddresses(msg *dns.Msg) []string {
 	return ips
 }
 
-func getTLD(domain string) string {
+// ExtractDomain 提取完整域名
+func ExtractDomain(domain string) string {
+	// 将域名按 "." 分割
 	parts := strings.Split(domain, ".")
+
+	// 如果域名部分少于 2，直接返回原域名
 	if len(parts) < 2 {
-		return domain // 如果域名中没有点，返回原始域名
+		return domain
 	}
-	// 返回最后两个部分作为顶级域名
-	return parts[len(parts)-2] + "." + parts[len(parts)-1]
+
+	// 获取最后两个部分
+	lastTwoParts := parts[len(parts)-2:] // 例如 ["google", "com"]
+
+	// 如果是国家/地区顶级域名（ccTLD），则还需要加上倒数第三部分
+	if len(parts) > 2 && len(parts[len(parts)-1]) == 2 {
+		// 例如 "google.com.hk"，需要提取 "google.com.hk"
+		lastTwoParts = append(parts[len(parts)-3:len(parts)-1], parts[len(parts)-1])
+	}
+
+	// 组合成完整域名
+	return strings.Join(lastTwoParts, ".")
 }

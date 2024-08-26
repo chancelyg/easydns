@@ -62,7 +62,7 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	var cache *lru.Cache
 	var cacheDuration time.Duration
 
-	ltdDoamin := getTLD(requestedDomain)
+	ltdDoamin := ExtractDomain(requestedDomain)
 	if _, exists := config.DomainList[ltdDoamin]; exists {
 		upstream = config.MinorDNS
 		cache = config.CacheMinorDNS
