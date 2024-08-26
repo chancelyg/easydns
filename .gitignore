@@ -24,3 +24,4 @@ go.work.sum
 dist
 .vscode
 domain.txt
+hosts

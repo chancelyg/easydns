@@ -53,10 +53,7 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		if len(response.Answer) > 0 {
 			log.WithFields(log.Fields{"clientIP": clientIP, "requestedDomain": requestedDomain, "requestType": requestType, "ips": ips}).Info(("query success by hosts file"))
-			nxdomainResponse := new(dns.Msg)
-			nxdomainResponse.SetReply(r)
-			nxdomainResponse.Rcode = dns.RcodeNotImplemented
-			w.WriteMsg(nxdomainResponse)
+			w.WriteMsg(response)
 			return
 		}
 	}
