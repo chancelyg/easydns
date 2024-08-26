@@ -9,6 +9,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const CONST_VERSION = "1.0.0"
+
 type Config struct {
 	PrimaryDNS      string
 	MinorDNS        string
