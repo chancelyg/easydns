@@ -25,3 +25,5 @@ dist
 .vscode
 domain.txt
 hosts
+config.yaml
+filtered_servers.txt

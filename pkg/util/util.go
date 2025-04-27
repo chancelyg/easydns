@@ -1,4 +1,4 @@
-package main
+package util
 
 import (
 	"strings"
@@ -6,7 +6,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func extractIPAddresses(msg *dns.Msg) []string {
+func ExtractIPAddresses(msg *dns.Msg) []string {
 	var ips []string
 	for _, ans := range msg.Answer {
 		switch record := ans.(type) {

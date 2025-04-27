@@ -1,0 +1,20 @@
+server:
+  port: 53
+  udp_size: 512
+  ipv4: true
+  ipv6: false
+
+dns:
+  primary_servers:
+    - "223.5.5.5:53"
+    - "114.114.114.114:54"
+  filtered_servers: 
+    - "1.1.1.1:53"
+    - "8.8.8.8:53"
+
+cache:
+  limit: 4096
+
+paths:
+  filtered_server_list: "filtered_servers.txt"
+  hosts: "/etc/hosts"

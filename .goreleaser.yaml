@@ -10,6 +10,7 @@ before:
 builds:
   - env:
       - CGO_ENABLED=0
+    main: ./cmd/easydns
     goos:
       - linux
       - windows
@@ -31,7 +32,6 @@ builds:
       - mips64
       - mips64le
       - s390x
-    main: ./
 
 archives:
   - format: zip
