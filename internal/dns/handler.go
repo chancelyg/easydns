@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -14,12 +15,15 @@ import (
 )
 
 type Handler struct {
-	config *config.Config
+	config   *config.Config
+	connPool map[string]*dns.Client
+	poolLock sync.RWMutex
 }
 
 func NewHandler(cfg *config.Config) *Handler {
 	return &Handler{
-		config: cfg,
+		config:   cfg,
+		connPool: make(map[string]*dns.Client),
 	}
 }
 
@@ -58,35 +62,49 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		Get(interface{}) (interface{}, bool)
 		Add(interface{}, interface{}) bool
 	}
-	var cacheDuration time.Duration
+	const (
+		minCacheDuration = 60 * time.Second // 最小缓存时间1分钟
+		maxFilteredTTL   = 6 * time.Hour    // 受过滤域名最大缓存时间
+		maxPrimaryTTL    = 30 * time.Minute // 普通域名最大缓存时间
+	)
+
+	// Add EDNS0 support
+	opt := r.IsEdns0()
+	if opt == nil {
+		opt = new(dns.OPT)
+		opt.Hdr.Name = "."
+		opt.Hdr.Rrtype = dns.TypeOPT
+		opt.SetUDPSize(h.config.Server.UDPSize)
+		r.Extra = append(r.Extra, opt)
+	}
 
 	ltdDomain := util.ExtractDomain(requestedDomain)
 	if _, exists := h.config.DomainList[ltdDomain]; exists {
 		upstream = h.config.DNS.FilteredServers
 		cache = h.config.CacheMinorDNS
-		cacheDuration = 6 * time.Hour
 	} else {
 		upstream = h.config.DNS.PrimaryServers
 		cache = h.config.CachePrimaryDNS
-		cacheDuration = 5 * time.Minute
 	}
 
 	cacheID := fmt.Sprintf("%s-%s", requestType, requestedDomain)
 	if cachedResponse, found := cache.Get(cacheID); found {
 		cachedMsg := cachedResponse.(*dns.Msg)
-		ips := util.ExtractIPAddresses(cachedMsg)
-		logrus.WithFields(logrus.Fields{
-			"clientIP":        clientIP,
-			"cacheID":         cacheID,
-			"requestedDomain": requestedDomain,
-			"requestType":     requestType,
-			"ips":             ips,
-			"upstream":        upstream,
-			"cacheDuration":   cacheDuration.String(),
-		}).Info("query success by cache")
-		cachedMsg.Id = r.Id
-		w.WriteMsg(cachedMsg)
-		return
+		// Check if cache TTL is still valid
+		if !isCacheExpired(cachedMsg) {
+			ips := util.ExtractIPAddresses(cachedMsg)
+			logrus.WithFields(logrus.Fields{
+				"clientIP":        clientIP,
+				"cacheID":         cacheID,
+				"requestedDomain": requestedDomain,
+				"requestType":     requestType,
+				"ips":             ips,
+				"upstream":        upstream,
+			}).Info("query success by cache")
+			cachedMsg.Id = r.Id
+			w.WriteMsg(cachedMsg)
+			return
+		}
 	}
 
 	// 并发查询所有上游DNS服务器
@@ -128,7 +146,6 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 				"ips":             util.ExtractIPAddresses(resp.msg),
 				"upstream":        upstream,
 				"responseServer":  resp.server,
-				"cacheDuration":   cacheDuration.String(),
 			}).Info("query dns record success")
 			if resp.msg != nil && len(resp.msg.Answer) > 0 {
 				close(done) // 通知其他 goroutine 退出
@@ -153,6 +170,24 @@ handleResponse:
 			"upstream":        upstream,
 		}).Error("all dns servers failed to respond")
 		return
+	}
+
+	// 根据响应确定缓存时间
+	ttl := getMinTTL(response)
+	cacheDuration := time.Duration(ttl) * time.Second
+
+	// 确保缓存时间在合理范围内
+	if cacheDuration < minCacheDuration {
+		cacheDuration = minCacheDuration
+	}
+
+	maxTTL := maxPrimaryTTL
+	if _, exists := h.config.DomainList[ltdDomain]; exists {
+		maxTTL = maxFilteredTTL
+	}
+
+	if cacheDuration > maxTTL {
+		cacheDuration = maxTTL
 	}
 
 	time.AfterFunc(cacheDuration, func() {
@@ -201,16 +236,47 @@ func (h *Handler) handleHostsResponse(w dns.ResponseWriter, r *dns.Msg, ips []st
 }
 
 func (h *Handler) forwardDNSQuery(query *dns.Msg, server string) (*dns.Msg, error) {
-	client := &dns.Client{
-		UDPSize: h.config.Server.UDPSize,
+	h.poolLock.RLock()
+	client, exists := h.connPool[server]
+	h.poolLock.RUnlock()
+
+	if !exists {
+		h.poolLock.Lock()
+		client = &dns.Client{
+			UDPSize: h.config.Server.UDPSize,
+			Net:     "udp",
+		}
+		h.connPool[server] = client
+		h.poolLock.Unlock()
 	}
+
 	response, _, err := client.Exchange(query, server)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"server": server,
-			"err":    err,
-		}).Error("Failed to forward query")
-		return nil, err
+	return response, err
+}
+
+func getMinTTL(msg *dns.Msg) uint32 {
+	if msg == nil || len(msg.Answer) == 0 {
+		return 0
 	}
-	return response, nil
+
+	minTTL := msg.Answer[0].Header().Ttl
+	for _, answer := range msg.Answer {
+		if answer.Header().Ttl < minTTL {
+			minTTL = answer.Header().Ttl
+		}
+	}
+	return minTTL
+}
+
+func isCacheExpired(msg *dns.Msg) bool {
+	if msg == nil || len(msg.Answer) == 0 {
+		return true
+	}
+
+	for _, answer := range msg.Answer {
+		if answer.Header().Ttl == 0 {
+			return true
+		}
+	}
+	return false
 }
