@@ -72,22 +72,22 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	cacheID := fmt.Sprintf("%s-%s", requestType, requestedDomain)
-	// if cachedResponse, found := cache.Get(cacheID); found {
-	// 	cachedMsg := cachedResponse.(*dns.Msg)
-	// 	ips := util.ExtractIPAddresses(cachedMsg)
-	// 	logrus.WithFields(logrus.Fields{
-	// 		"clientIP":        clientIP,
-	// 		"cacheID":         cacheID,
-	// 		"requestedDomain": requestedDomain,
-	// 		"requestType":     requestType,
-	// 		"ips":             ips,
-	// 		"upstream":        upstream,
-	// 		"cacheDuration":   cacheDuration.String(),
-	// 	}).Info("query success by cache")
-	// 	cachedMsg.Id = r.Id
-	// 	w.WriteMsg(cachedMsg)
-	// 	return
-	// }
+	if cachedResponse, found := cache.Get(cacheID); found {
+		cachedMsg := cachedResponse.(*dns.Msg)
+		ips := util.ExtractIPAddresses(cachedMsg)
+		logrus.WithFields(logrus.Fields{
+			"clientIP":        clientIP,
+			"cacheID":         cacheID,
+			"requestedDomain": requestedDomain,
+			"requestType":     requestType,
+			"ips":             ips,
+			"upstream":        upstream,
+			"cacheDuration":   cacheDuration.String(),
+		}).Info("query success by cache")
+		cachedMsg.Id = r.Id
+		w.WriteMsg(cachedMsg)
+		return
+	}
 
 	// 并发查询所有上游DNS服务器
 	type dnsResponse struct {
