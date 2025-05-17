@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -66,6 +67,7 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		minCacheDuration = 60 * time.Second // 最小缓存时间1分钟
 		maxFilteredTTL   = 6 * time.Hour    // 受过滤域名最大缓存时间
 		maxPrimaryTTL    = 30 * time.Minute // 普通域名最大缓存时间
+		dnsQueryTimeout  = 3 * time.Second  // DNS查询超时时间
 	)
 
 	// Add EDNS0 support
@@ -107,62 +109,82 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 
-	// 并发查询所有上游DNS服务器
+	// 并发查询所有上游DNS服务器，增加超时控制
 	type dnsResponse struct {
 		msg    *dns.Msg
 		server string
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dnsQueryTimeout)
+	defer cancel()
+
 	responses := make(chan dnsResponse, len(upstream))
-	errors := make(chan error, len(upstream))
-	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// 为了减少IPv6查询慢导致的整体延迟，优先处理A记录（IPv4）的响应
+	var ipv4Response *dns.Msg
+	var ipv4Server string
+	var ipv4Mutex sync.Mutex
 
 	for _, server := range upstream {
+		wg.Add(1)
 		go func(srv string) {
-			response, err := h.forwardDNSQuery(r, srv)
+			defer wg.Done()
+
+			response, err := h.forwardDNSQuery(ctx, r, srv)
 			if err != nil {
-				select {
-				case errors <- err:
-				case <-done:
-				}
+				logrus.WithFields(logrus.Fields{
+					"server": srv,
+					"error":  err,
+					"domain": requestedDomain,
+				}).Debug("DNS query failed")
 				return
 			}
+
+			// 如果是A记录查询且有结果，优先保存
+			if requestType == "A" && response != nil && len(response.Answer) > 0 {
+				ipv4Mutex.Lock()
+				if ipv4Response == nil {
+					ipv4Response = response
+					ipv4Server = srv
+				}
+				ipv4Mutex.Unlock()
+			}
+
 			select {
 			case responses <- dnsResponse{msg: response, server: srv}:
-			case <-done:
+			case <-ctx.Done():
+				return
 			}
 		}(server)
 	}
 
-	// 获取第一个成功的响应
-	var response *dns.Msg
-	errorCount := 0
-	for {
-		select {
-		case resp := <-responses:
-			logrus.WithFields(logrus.Fields{
-				"clientIP":        clientIP,
-				"requestedDomain": requestedDomain,
-				"requestType":     requestType,
-				"ips":             util.ExtractIPAddresses(resp.msg),
-				"upstream":        upstream,
-				"responseServer":  resp.server,
-			}).Info("query dns record success")
-			if resp.msg != nil && len(resp.msg.Answer) > 0 {
-				close(done) // 通知其他 goroutine 退出
-				response = resp.msg
-				goto handleResponse
-			}
-		case <-errors:
-			errorCount++
-			if errorCount == len(upstream) {
-				close(done)
-				goto handleResponse
-			}
+	// 等待所有查询完成或超时
+	go func() {
+		wg.Wait()
+		close(responses)
+	}()
+
+	// 收集结果
+	var bestResponse *dns.Msg
+	var responseServer string
+
+	for resp := range responses {
+		if resp.msg != nil && len(resp.msg.Answer) > 0 {
+			bestResponse = resp.msg
+			responseServer = resp.server
+			break
 		}
 	}
 
-handleResponse:
-	if response == nil {
+	// 如果没有找到结果但有IPv4结果，使用IPv4结果
+	if bestResponse == nil && ipv4Response != nil {
+		bestResponse = ipv4Response
+		responseServer = ipv4Server
+	}
+
+	// 处理响应
+	if bestResponse == nil {
 		dns.HandleFailed(w, r)
 		logrus.WithFields(logrus.Fields{
 			"clientIP":        clientIP,
@@ -172,8 +194,17 @@ handleResponse:
 		return
 	}
 
+	logrus.WithFields(logrus.Fields{
+		"clientIP":        clientIP,
+		"requestedDomain": requestedDomain,
+		"requestType":     requestType,
+		"ips":             util.ExtractIPAddresses(bestResponse),
+		"upstream":        upstream,
+		"responseServer":  responseServer,
+	}).Info("query dns record success")
+
 	// 根据响应确定缓存时间
-	ttl := getMinTTL(response)
+	ttl := getMinTTL(bestResponse)
 	cacheDuration := time.Duration(ttl) * time.Second
 
 	// 确保缓存时间在合理范围内
@@ -196,11 +227,11 @@ handleResponse:
 		}
 	})
 
-	ips := util.ExtractIPAddresses(response)
+	ips := util.ExtractIPAddresses(bestResponse)
 	if len(ips) > 0 {
-		cache.Add(cacheID, response)
+		cache.Add(cacheID, bestResponse)
 	}
-	w.WriteMsg(response)
+	w.WriteMsg(bestResponse)
 }
 
 func (h *Handler) sendNotImplemented(w dns.ResponseWriter, r *dns.Msg) {
@@ -235,7 +266,7 @@ func (h *Handler) handleHostsResponse(w dns.ResponseWriter, r *dns.Msg, ips []st
 	return false
 }
 
-func (h *Handler) forwardDNSQuery(query *dns.Msg, server string) (*dns.Msg, error) {
+func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server string) (*dns.Msg, error) {
 	h.poolLock.RLock()
 	client, exists := h.connPool[server]
 	h.poolLock.RUnlock()
@@ -245,13 +276,32 @@ func (h *Handler) forwardDNSQuery(query *dns.Msg, server string) (*dns.Msg, erro
 		client = &dns.Client{
 			UDPSize: h.config.Server.UDPSize,
 			Net:     "udp",
+			Timeout: 2 * time.Second, // 添加超时设置
 		}
 		h.connPool[server] = client
 		h.poolLock.Unlock()
 	}
 
-	response, _, err := client.Exchange(query, server)
-	return response, err
+	// 使用上下文控制超时
+	type exchangeResult struct {
+		msg *dns.Msg
+		rtt time.Duration
+		err error
+	}
+
+	resultChan := make(chan exchangeResult, 1)
+
+	go func() {
+		msg, rtt, err := client.Exchange(query, server)
+		resultChan <- exchangeResult{msg: msg, rtt: rtt, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultChan:
+		return result.msg, result.err
+	}
 }
 
 func getMinTTL(msg *dns.Msg) uint32 {
