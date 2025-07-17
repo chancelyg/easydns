@@ -1,21 +1,36 @@
 # EasyDNS
 
-一个用 Go 编写的高性能 DNS 代理服务器，支持基于域名列表的 DNS 分流、缓存、本地 hosts，并支持 SOCKS5 代理转发。
+一个用 Go 编写的高性能 DNS 代理服务器，支持基于域名列表的 DNS 分流、缓存、本地 hosts，并支持多种 DNS 协议（UDP、TCP、TLS）和 SOCKS5 代理转发。
 
 ## 特性
 
-- 基于配置的 DNS 分流（例如国内外采用不同的 DNS 查询）
-- LRU 缓存机制提升查询性能
-- 支持 UDP 和 TCP 协议
-- 支持本地 hosts 文件
-- IPv4/IPv6 配置支持
-- 详细的日志记录
-- 支持 SOCKS5 代理转发（可为主/过滤 DNS 配置代理）
+- 🚀 **智能 DNS 分流**：基于配置的域名列表智能选择不同的 DNS 服务器
+- 📦 **多协议支持**：支持传统 UDP/TCP 协议和现代 TLS 加密协议（DNS over TLS）
+- 🔧 **灵活的服务器格式**：支持多种 DNS 服务器配置格式，自动端口补全
+- 💾 **高效缓存机制**：LRU 缓存机制显著提升查询性能
+- 🌐 **代理支持**：支持 SOCKS5 代理转发，可为不同 DNS 服务器组配置独立代理
+- 📋 **本地 hosts 支持**：支持本地 hosts 文件解析
+- 🔗 **IPv4/IPv6 支持**：可配置的 IPv4 和 IPv6 协议支持
+- 📊 **详细日志记录**：完整的查询日志和性能统计
 
-分流策略：
+### DNS 服务器格式支持
 
-- 当域名符合配置文件中的 `filtered_server_list` 中的记录时，将返回 `filtered_servers` 的解析结果
-- 其他域名一律走 `primary_servers` 的解析结果
+支持以下多种 DNS 服务器配置格式：
+
+| 格式                | 协议 | 端口 | 说明                           |
+| ------------------- | ---- | ---- | ------------------------------ |
+| `8.8.8.8`           | UDP  | 53   | 最简格式，自动补全默认端口     |
+| `8.8.8.8:53`        | UDP  | 53   | 标准 UDP 格式，指定端口        |
+| `tcp://8.8.8.8`     | TCP  | 53   | TCP 协议，自动补全默认端口     |
+| `tcp://8.8.8.8:53`  | TCP  | 53   | TCP 协议，指定端口             |
+| `tls://8.8.8.8`     | TLS  | 853  | DNS over TLS，自动补全默认端口 |
+| `tls://8.8.8.8:853` | TLS  | 853  | DNS over TLS，指定端口         |
+
+### 分流策略
+
+- 当查询域名匹配 `filtered_server_list` 文件中的记录时，使用 `filtered_servers` 进行解析
+- 其他域名使用 `primary_servers` 进行解析
+- 支持为不同服务器组配置独立的 SOCKS5 代理
 
 ## 安装
 
@@ -47,66 +62,199 @@ dns:
 
 配置文件使用 YAML 格式，默认为 `config.yaml`。配置项按功能模块划分：
 
+### 基础配置示例
+
 ```yaml
 server:
-  port: 53 # 服务监听端口
-  udp_size: 512 # UDP包大小
-  ipv4: true # 是否启用IPv4
-  ipv6: false # 是否启用IPv6
+  port: 53 # DNS服务监听端口
+  udp_size: 1492 # UDP包最大大小
+  ipv4: true # 启用IPv4支持
+  ipv6: true # 启用IPv6支持
 
-  primary_servers: # 主DNS服务器列表
-    - "114.114.114.114:53"
-    - "1.1.1.1:53"
-    - "8.8.4.4:53"
-  filtered_servers: # 备用DNS服务器
-    - "1.1.1.1:53"
-    - "8.8.8.8:53"
-  primary_proxy: "socks5://127.0.0.1:1080" # 主DNS使用的SOCKS5代理（可选）
-  filter_proxy: "socks5://127.0.0.1:1081" # 过滤DNS使用的SOCKS5代理（可选）
+dns:
+  primary_servers: # 主DNS服务器列表（用于一般域名查询）
+    - "114.114.114.114" # 自动补全为 114.114.114.114:53
+    - "119.29.29.29:53" # 标准UDP格式
+    - "tcp://1.1.1.1" # TCP协议，自动补全为 tcp://1.1.1.1:53
+
+  filtered_servers: # 过滤DNS服务器列表（用于特定域名查询）
+    - "tls://8.8.8.8" # DNS over TLS，自动补全为 tls://8.8.8.8:853
+    - "tls://1.1.1.1:853" # DNS over TLS，指定端口
+
+  # 可选的SOCKS5代理配置
+  primary_proxy: "socks5://192.168.1.1:1080" # 主DNS服务器使用的代理
+  filter_proxy: "socks5://192.168.1.1:1081" # 过滤DNS服务器使用的代理
 
 cache:
-  limit: 4096 # 缓存条目限制
+  limit: 4096 # DNS缓存最大条目数
 
 paths:
-  filtered_server_list: "filtered_servers.txt" # 域名列表文件路径
-  hosts: "/etc/hosts" # hosts文件路径
+  filtered_server_list: "/path/to/filtered_servers.txt" # 域名过滤列表文件
+  hosts: "/etc/hosts" # 系统hosts文件路径
 ```
 
-### SOCKS5 代理说明
+### DNS 服务器配置详解
 
-如需为 DNS 查询添加代理转发，只需在 `dns` 节点下配置 `primary_proxy` 或 `filter_proxy`，格式为：
+#### 支持的协议类型
 
+1. **UDP 协议**（默认）
+
+   - `8.8.8.8` → 自动扩展为 `8.8.8.8:53`
+   - `8.8.8.8:53` → 保持原格式
+   - `udp://8.8.8.8` → 显式指定 UDP 协议
+
+2. **TCP 协议**
+
+   - `tcp://8.8.8.8` → 自动扩展为 `tcp://8.8.8.8:53`
+   - `tcp://8.8.8.8:53` → 指定端口的 TCP 格式
+
+3. **TLS 协议**（DNS over TLS / DoT）
+   - `tls://8.8.8.8` → 自动扩展为 `tls://8.8.8.8:853`
+   - `tls://8.8.8.8:853` → 指定端口的 TLS 格式
+   - 提供加密的 DNS 查询，保护隐私和防止篡改
+
+#### 端口自动补全规则
+
+- **UDP/TCP 协议**：未指定端口时自动补全为 `:53`
+- **TLS 协议**：未指定端口时自动补全为 `:853`（RFC 7858 标准端口）
+- **自定义端口**：可以为任何协议指定自定义端口
+
+### SOCKS5 代理配置
+
+支持为不同 DNS 服务器组配置独立的 SOCKS5 代理：
+
+```yaml
+dns:
+  primary_servers:
+    - "114.114.114.114"
+    - "119.29.29.29"
+  filtered_servers:
+    - "tls://8.8.8.8"
+    - "tls://1.1.1.1"
+
+  # 为主DNS服务器配置代理（可选）
+  primary_proxy: "socks5://proxy1.example.com:1080"
+
+  # 为过滤DNS服务器配置代理（可选）
+  filter_proxy: "socks5://proxy2.example.com:1081"
 ```
-primary_proxy: "socks5://127.0.0.1:1080"
-filter_proxy: "socks5://127.0.0.1:1081"
-```
 
-分别对应主 DNS 和过滤 DNS 的代理。
+**代理使用场景：**
+
+- 主 DNS 使用国内代理加速访问
+- 过滤 DNS 使用国际代理突破限制
+- TLS 连接也支持通过代理建立
 
 ## 域名列表格式
 
-域名列表文件（由 paths.filtered_server_list 指定），每行一个域名，无需其它符号：
+域名列表文件（由 `paths.filtered_server_list` 指定）用于控制 DNS 分流，每行一个域名：
 
 ```
 github.com
 google.com
+youtube.com
 ```
 
-## 开发相关
+**匹配规则：**
 
-### 依赖
+- 精确匹配：`github.com` 只匹配 `github.com`
+- 子域名不自动匹配：需要单独添加 `api.github.com`
 
-- Go 1.18+
-- github.com/miekg/dns: DNS 库
-- github.com/hashicorp/golang-lru: LRU 缓存实现
-- gopkg.in/yaml.v3: YAML 配置解析
-- golang.org/x/net/proxy: SOCKS5 代理支持
+## 使用示例
 
-### 构建
+### 基础使用
 
 ```bash
-goreleaser --snapshot --clean
+# 使用默认配置文件
+./easydns
+
+# 指定配置文件
+./easydns -c /path/to/config.yaml
+
+# 查看版本信息
+./easydns -V
+
+# 查看帮助信息
+./easydns -h
 ```
+
+### 配置示例场景
+
+#### 场景 1：国内外 DNS 分流
+
+```yaml
+dns:
+  primary_servers: # 国内DNS（用于一般域名）
+    - "114.114.114.114"
+    - "119.29.29.29"
+
+  filtered_servers: # 国外DNS（用于国外域名）
+    - "tls://8.8.8.8" # 使用TLS加密
+    - "tls://1.1.1.1"
+
+  filter_proxy: "socks5://127.0.0.1:1081" # 国外DNS通过代理访问
+```
+
+#### 场景 2：隐私优先配置
+
+```yaml
+dns:
+  primary_servers:
+    - "tls://1.1.1.1" # Cloudflare DNS over TLS
+    - "tls://8.8.8.8" # Google DNS over TLS
+
+  filtered_servers:
+    - "tls://9.9.9.9" # Quad9 DNS over TLS
+```
+
+#### 场景 3：混合协议配置
+
+```yaml
+dns:
+  primary_servers:
+    - "114.114.114.114" # 国内UDP，速度快
+    - "tcp://119.29.29.29" # 国内TCP，稳定性好
+
+  filtered_servers:
+    - "tls://8.8.8.8" # 国外TLS，隐私保护
+    - "udp://1.1.1.1:53" # 国外UDP，备用
+```
+
+## 常见问题
+
+### Q: 如何测试 DNS over TLS 是否工作正常？
+
+```bash
+# 使用dig测试（需要安装bind-utils）
+dig @127.0.0.1 +tcp +tls-ca=/etc/ssl/certs/ca-certificates.crt google.com
+
+# 使用nslookup测试
+nslookup google.com 127.0.0.1
+```
+
+### Q: 代理连接失败怎么办？
+
+1. 检查代理服务器是否正常运行
+2. 验证代理地址格式：`socks5://host:port`
+3. 确认防火墙没有阻止连接
+4. 查看日志获取详细错误信息
+
+### Q: TLS 连接失败的可能原因？
+
+1. **证书验证失败**: 检查系统时间是否正确
+2. **SNI 不匹配**: 确保 DNS 服务器支持 TLS
+3. **网络问题**: 检查 853 端口是否被阻止
+4. **代理问题**: TLS through proxy 需要代理支持 CONNECT 方法
+
+## 贡献指南
+
+欢迎提交 Issue 和 Pull Request！
+
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启 Pull Request
 
 ## 许可证
 

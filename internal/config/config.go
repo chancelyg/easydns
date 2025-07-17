@@ -2,7 +2,10 @@ package config
 
 import (
 	"bufio"
+	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"easydns/internal/cache"
@@ -67,8 +70,14 @@ func LoadFromFile(filename string) (*Config, error) {
 		cfg.DNS.PrimaryServers = []string{"114.114.114.114:53"}
 	}
 	if len(cfg.DNS.FilteredServers) == 0 {
-		cfg.DNS.PrimaryServers = []string{"8.8.8.8:53"}
+		cfg.DNS.FilteredServers = []string{"8.8.8.8:53"}
 	}
+
+	// 验证和标准化DNS服务器格式
+	if err := cfg.validateAndNormalizeDNSServers(); err != nil {
+		return nil, err
+	}
+
 	if cfg.Cache.Limit == 0 {
 		cfg.Cache.Limit = 4096
 	}
@@ -157,4 +166,154 @@ func parseHostsFile(filePath string) map[string][]string {
 	}
 
 	return hosts
+}
+
+// validateAndNormalizeDNSServers 验证并标准化DNS服务器配置
+//
+// 该方法会：
+//  1. 解析并验证所有primary_servers和filtered_servers中的DNS服务器地址
+//  2. 将简化格式（如"8.8.8.8"）标准化为完整格式（如"8.8.8.8:53"）
+//  3. 支持多种协议前缀：udp://、tcp://、tls://
+//  4. 验证主机地址和端口号的有效性
+//
+// 返回值：
+//   - error: 如果发现无效的DNS服务器配置则返回错误，成功时返回nil
+func (c *Config) validateAndNormalizeDNSServers() error {
+	// 验证主DNS服务器
+	for i, server := range c.DNS.PrimaryServers {
+		normalized, err := c.parseDNSServer(server)
+		if err != nil {
+			return fmt.Errorf("invalid primary DNS server '%s': %w", server, err)
+		}
+		c.DNS.PrimaryServers[i] = normalized
+	}
+
+	// 验证过滤DNS服务器
+	for i, server := range c.DNS.FilteredServers {
+		normalized, err := c.parseDNSServer(server)
+		if err != nil {
+			return fmt.Errorf("invalid filtered DNS server '%s': %w", server, err)
+		}
+		c.DNS.FilteredServers[i] = normalized
+	}
+
+	return nil
+}
+
+// parseDNSServer 解析单个DNS服务器配置字符串
+//
+// 支持的输入格式：
+//   - "8.8.8.8"               -> "8.8.8.8:53" (UDP协议，默认端口)
+//   - "8.8.8.8:53"            -> "8.8.8.8:53" (UDP协议，指定端口)
+//   - "tcp://8.8.8.8"         -> "tcp://8.8.8.8:53" (TCP协议，默认端口)
+//   - "tcp://8.8.8.8:53"      -> "tcp://8.8.8.8:53" (TCP协议，指定端口)
+//   - "tls://8.8.8.8"         -> "tls://8.8.8.8:853" (TLS协议，默认端口)
+//   - "tls://8.8.8.8:853"     -> "tls://8.8.8.8:853" (TLS协议，指定端口)
+//
+// 参数：
+//   - server: 待解析的DNS服务器配置字符串
+//
+// 返回值：
+//   - string: 标准化后的DNS服务器地址
+//   - error: 解析过程中遇到的错误
+func (c *Config) parseDNSServer(server string) (string, error) {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return "", fmt.Errorf("empty server string")
+	}
+
+	protocol := "udp" // 默认协议为UDP
+	defaultPort := 53 // 默认端口为53
+
+	// 解析协议前缀，确定协议类型和默认端口
+	if strings.HasPrefix(server, "tls://") {
+		protocol = "tls"
+		defaultPort = 853 // DNS over TLS标准端口
+		server = strings.TrimPrefix(server, "tls://")
+	} else if strings.HasPrefix(server, "tcp://") {
+		protocol = "tcp"
+		server = strings.TrimPrefix(server, "tcp://")
+	} else if strings.HasPrefix(server, "udp://") {
+		protocol = "udp"
+		server = strings.TrimPrefix(server, "udp://")
+	}
+
+	var host string
+	var port int
+
+	// 解析主机和端口
+	if strings.Contains(server, ":") {
+		h, portStr, err := net.SplitHostPort(server)
+		if err != nil {
+			return "", fmt.Errorf("invalid server format: %w", err)
+		}
+
+		p, err := strconv.Atoi(portStr)
+		if err != nil {
+			return "", fmt.Errorf("invalid port number: %w", err)
+		}
+
+		if p < 1 || p > 65535 {
+			return "", fmt.Errorf("port number out of range: %d", p)
+		}
+
+		host = h
+		port = p
+	} else {
+		host = server
+		port = defaultPort
+	}
+
+	// 验证主机地址
+	if net.ParseIP(host) == nil {
+		// 如果不是IP地址，验证是否为有效域名
+		if !c.isValidDomainName(host) {
+			return "", fmt.Errorf("invalid host address: %s", host)
+		}
+	}
+
+	// 构建标准化地址
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+
+	// 根据协议返回相应格式
+	switch protocol {
+	case "tls":
+		return fmt.Sprintf("tls://%s", address), nil
+	case "tcp":
+		return fmt.Sprintf("tcp://%s", address), nil
+	default:
+		return address, nil
+	}
+}
+
+// isValidDomainName 验证域名格式的有效性
+//
+// 执行基本的域名格式验证，包括：
+//   - 长度限制：域名总长度不能超过253字符（RFC 1035规定）
+//   - 字符集验证：只允许字母、数字、点号和连字符
+//
+// 注意：这是一个简化的验证函数，不包括完整的RFC域名规范检查
+//
+// 参数：
+//   - domain: 待验证的域名字符串
+//
+// 返回值：
+//   - bool: 域名格式有效返回true，否则返回false
+func (c *Config) isValidDomainName(domain string) bool {
+	// RFC 1035规定域名最大长度为253字符
+	if len(domain) == 0 || len(domain) > 253 {
+		return false
+	}
+
+	// 验证字符集：仅允许字母、数字、点号和连字符
+	for _, char := range domain {
+		if !((char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			char == '.' || char == '-') {
+			return false
+		}
+	}
+
+	return true
 }

@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/url"
@@ -331,38 +332,22 @@ func (h *Handler) handleHostsResponse(w dns.ResponseWriter, r *dns.Msg, ips []st
 	return false
 }
 
-// forwardDNSQuery 转发DNS查询，支持SOCKS5代理
+// forwardDNSQuery 转发DNS查询，支持UDP、TCP、TLS和SOCKS5代理
 func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server string, useFiltered bool) (*dns.Msg, error) {
+	// 解析服务器信息
+	serverInfo, err := ParseDNSServer(server)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse server %s: %w", server, err)
+	}
+
+	// 获取或创建客户端
 	h.poolLock.RLock()
 	client, exists := h.connPool[server]
 	h.poolLock.RUnlock()
 
 	if !exists {
 		h.poolLock.Lock()
-
-		// 根据server类型选择合适的代理
-		var dialer proxy.Dialer
-		if useFiltered && h.filteredDialer != nil {
-			dialer = h.filteredDialer
-		} else if !useFiltered && h.primaryDialer != nil {
-			dialer = h.primaryDialer
-		}
-
-		client = &dns.Client{
-			UDPSize: h.config.Server.UDPSize,
-			Net:     "udp",
-			Timeout: 2 * time.Second,
-		}
-
-		// 如果需要使用代理，设置拨号器
-		if dialer != nil {
-			client.Dialer = &net.Dialer{
-				Timeout: 2 * time.Second,
-			}
-			// 为代理创建自定义连接
-			client.Net = "tcp" // SOCKS5代理通常使用TCP
-		}
-
+		client = h.createDNSClient(serverInfo, useFiltered)
 		h.connPool[server] = client
 		h.poolLock.Unlock()
 	}
@@ -381,11 +366,13 @@ func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server st
 		var rtt time.Duration
 		var err error
 
-		// 如果需要使用代理，使用代理连接
-		if (useFiltered && h.filteredDialer != nil) || (!useFiltered && h.primaryDialer != nil) {
-			msg, rtt, err = h.exchangeWithProxy(query, server, useFiltered)
+		// 根据协议和代理情况选择连接方式
+		if serverInfo.Protocol == "tls" {
+			msg, rtt, err = h.exchangeWithTLS(query, serverInfo, useFiltered)
+		} else if (useFiltered && h.filteredDialer != nil) || (!useFiltered && h.primaryDialer != nil) {
+			msg, rtt, err = h.exchangeWithProxy(query, serverInfo.Address, useFiltered)
 		} else {
-			msg, rtt, err = client.Exchange(query, server)
+			msg, rtt, err = client.Exchange(query, serverInfo.Address)
 		}
 
 		resultChan <- exchangeResult{msg: msg, rtt: rtt, err: err}
@@ -397,6 +384,145 @@ func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server st
 	case result := <-resultChan:
 		return result.msg, result.err
 	}
+}
+
+// createDNSClient 根据服务器信息和代理设置创建适当的DNS客户端
+//
+// 该方法会：
+//  1. 根据协议类型（UDP/TCP/TLS）设置相应的网络类型
+//  2. 为TLS连接配置TLS证书验证
+//  3. 根据需要配置SOCKS5代理拨号器
+//  4. 设置合适的超时时间和UDP包大小
+//
+// 参数：
+//   - serverInfo: 解析后的DNS服务器信息
+//   - useFiltered: 是否使用过滤DNS服务器的代理设置
+//
+// 返回值：
+//   - *dns.Client: 配置好的DNS客户端
+func (h *Handler) createDNSClient(serverInfo *DNSServerInfo, useFiltered bool) *dns.Client {
+	client := &dns.Client{
+		UDPSize: h.config.Server.UDPSize, // 使用配置中的UDP包大小
+		Timeout: 2 * time.Second,         // 设置2秒超时
+	}
+
+	// 根据协议类型配置网络连接参数
+	switch serverInfo.Protocol {
+	case "tls":
+		client.Net = "tcp-tls" // 使用TLS over TCP
+		client.TLSConfig = &tls.Config{
+			ServerName: serverInfo.Host, // 设置SNI服务器名称用于证书验证
+		}
+	case "tcp":
+		client.Net = "tcp" // 使用标准TCP
+	default:
+		client.Net = "udp" // 默认使用UDP
+	}
+
+	// 配置SOCKS5代理（如果需要且可用）
+	var dialer proxy.Dialer
+	if useFiltered && h.filteredDialer != nil {
+		dialer = h.filteredDialer // 使用过滤DNS的代理
+	} else if !useFiltered && h.primaryDialer != nil {
+		dialer = h.primaryDialer // 使用主DNS的代理
+	}
+
+	// 为非TLS连接配置代理拨号器
+	if dialer != nil && serverInfo.Protocol != "tls" {
+		client.Dialer = &net.Dialer{
+			Timeout: 2 * time.Second,
+		}
+		// SOCKS5代理通常需要TCP连接
+		if client.Net == "udp" {
+			client.Net = "tcp"
+		}
+	}
+
+	return client
+}
+
+// exchangeWithTLS 通过TLS连接进行DNS查询（DNS over TLS）
+//
+// 该方法实现了DNS over TLS (DoT) 协议，支持：
+//  1. 直接TLS连接到DNS服务器
+//  2. 通过SOCKS5代理建立TLS连接
+//  3. 正确的TLS握手和证书验证
+//  4. 连接超时和错误处理
+//
+// 参数：
+//   - query: 要发送的DNS查询消息
+//   - serverInfo: DNS服务器信息（包含主机名用于TLS验证）
+//   - useFiltered: 是否使用过滤DNS的代理设置
+//
+// 返回值：
+//   - *dns.Msg: DNS响应消息
+//   - time.Duration: 查询耗时
+//   - error: 连接或查询过程中的错误
+func (h *Handler) exchangeWithTLS(query *dns.Msg, serverInfo *DNSServerInfo, useFiltered bool) (*dns.Msg, time.Duration, error) {
+	start := time.Now()
+
+	// 声明连接变量
+	var conn net.Conn
+	var err error
+
+	// 根据代理设置选择连接方式
+	if (useFiltered && h.filteredDialer != nil) || (!useFiltered && h.primaryDialer != nil) {
+		// 场景1：通过SOCKS5代理建立TLS连接
+		var dialer proxy.Dialer
+		if useFiltered {
+			dialer = h.filteredDialer
+		} else {
+			dialer = h.primaryDialer
+		}
+
+		// 先通过代理建立TCP连接
+		conn, err = dialer.Dial("tcp", serverInfo.Address)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to dial through proxy: %w", err)
+		}
+
+		// 在代理连接基础上建立TLS连接
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName: serverInfo.Host, // 重要：设置SNI用于证书验证
+		})
+		err = tlsConn.Handshake()
+		if err != nil {
+			conn.Close()
+			return nil, 0, fmt.Errorf("TLS handshake failed: %w", err)
+		}
+		conn = tlsConn
+	} else {
+		// 场景2：直接建立TLS连接到DNS服务器
+		conn, err = tls.Dial("tcp", serverInfo.Address, &tls.Config{
+			ServerName: serverInfo.Host, // 设置SNI服务器名称
+		})
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to establish TLS connection: %w", err)
+		}
+	}
+	defer conn.Close()
+
+	// 设置连接超时时间
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// 创建DNS over TLS连接
+	dnsConn := &dns.Conn{Conn: conn}
+	defer dnsConn.Close()
+
+	// 发送DNS查询
+	err = dnsConn.WriteMsg(query)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to write DNS query: %w", err)
+	}
+
+	// 读取DNS响应
+	response, err := dnsConn.ReadMsg()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read DNS response: %w", err)
+	}
+
+	rtt := time.Since(start)
+	return response, rtt, nil
 }
 
 // getMinTTL 获取DNS响应的最小TTL
