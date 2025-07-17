@@ -4,30 +4,91 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/proxy"
 
 	"easydns/internal/config"
 	"easydns/pkg/util"
 )
 
+// Handler DNS请求处理器，负责转发和缓存DNS查询
 type Handler struct {
-	config   *config.Config
-	connPool map[string]*dns.Client
-	poolLock sync.RWMutex
+	config         *config.Config         // 全局配置
+	connPool       map[string]*dns.Client // DNS客户端连接池
+	poolLock       sync.RWMutex           // 连接池锁
+	primaryDialer  proxy.Dialer           // 主DNS SOCKS5代理拨号器
+	filteredDialer proxy.Dialer           // 过滤DNS SOCKS5代理拨号器
 }
 
+// NewHandler 创建DNS请求处理器
 func NewHandler(cfg *config.Config) *Handler {
-	return &Handler{
+	h := &Handler{
 		config:   cfg,
 		connPool: make(map[string]*dns.Client),
 	}
+
+	// 初始化SOCKS5代理客户端
+	h.initProxyDialers()
+
+	return h
 }
 
+// initProxyDialers 初始化SOCKS5代理拨号器
+func (h *Handler) initProxyDialers() {
+	// 初始化primary_servers的代理
+	if h.config.DNS.PrimaryProxy != "" {
+		if dialer, err := h.createSOCKS5Dialer(h.config.DNS.PrimaryProxy); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"proxy": h.config.DNS.PrimaryProxy,
+				"error": err,
+			}).Error("Failed to create SOCKS5 dialer for primary servers")
+		} else {
+			h.primaryDialer = dialer
+			logrus.WithField("proxy", h.config.DNS.PrimaryProxy).Info("SOCKS5 proxy enabled for primary servers")
+		}
+	}
+
+	// 初始化filtered_servers的代理
+	if h.config.DNS.FilterProxy != "" {
+		if dialer, err := h.createSOCKS5Dialer(h.config.DNS.FilterProxy); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"proxy": h.config.DNS.FilterProxy,
+				"error": err,
+			}).Error("Failed to create SOCKS5 dialer for filtered servers")
+		} else {
+			h.filteredDialer = dialer
+			logrus.WithField("proxy", h.config.DNS.FilterProxy).Info("SOCKS5 proxy enabled for filtered servers")
+		}
+	}
+}
+
+// createSOCKS5Dialer 创建SOCKS5代理拨号器
+func (h *Handler) createSOCKS5Dialer(proxyURL string) (proxy.Dialer, error) {
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %w", err)
+	}
+
+	if u.Scheme != "socks5" {
+		return nil, fmt.Errorf("unsupported proxy scheme: %s, only socks5 is supported", u.Scheme)
+	}
+
+	// 创建SOCKS5代理拨号器
+	dialer, err := proxy.SOCKS5("tcp", u.Host, nil, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SOCKS5 proxy: %w", err)
+	}
+
+	return dialer, nil
+}
+
+// HandleDNSRequest 处理DNS请求入口
 func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	clientIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 	requestedDomain := strings.TrimSuffix(r.Question[0].Name, ".")
@@ -81,9 +142,11 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	ltdDomain := util.ExtractDomain(requestedDomain)
+	useFiltered := false
 	if _, exists := h.config.DomainList[ltdDomain]; exists {
 		upstream = h.config.DNS.FilteredServers
 		cache = h.config.CacheMinorDNS
+		useFiltered = true
 	} else {
 		upstream = h.config.DNS.PrimaryServers
 		cache = h.config.CachePrimaryDNS
@@ -131,7 +194,7 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		go func(srv string) {
 			defer wg.Done()
 
-			response, err := h.forwardDNSQuery(ctx, r, srv)
+			response, err := h.forwardDNSQuery(ctx, r, srv, useFiltered)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"server": srv,
@@ -234,6 +297,7 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	w.WriteMsg(bestResponse)
 }
 
+// sendNotImplemented 返回未实现响应
 func (h *Handler) sendNotImplemented(w dns.ResponseWriter, r *dns.Msg) {
 	nxdomainResponse := new(dns.Msg)
 	nxdomainResponse.SetReply(r)
@@ -241,6 +305,7 @@ func (h *Handler) sendNotImplemented(w dns.ResponseWriter, r *dns.Msg) {
 	w.WriteMsg(nxdomainResponse)
 }
 
+// handleHostsResponse 处理hosts文件中的DNS响应
 func (h *Handler) handleHostsResponse(w dns.ResponseWriter, r *dns.Msg, ips []string) bool {
 	response := new(dns.Msg)
 	response.SetReply(r)
@@ -266,18 +331,38 @@ func (h *Handler) handleHostsResponse(w dns.ResponseWriter, r *dns.Msg, ips []st
 	return false
 }
 
-func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server string) (*dns.Msg, error) {
+// forwardDNSQuery 转发DNS查询，支持SOCKS5代理
+func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server string, useFiltered bool) (*dns.Msg, error) {
 	h.poolLock.RLock()
 	client, exists := h.connPool[server]
 	h.poolLock.RUnlock()
 
 	if !exists {
 		h.poolLock.Lock()
+
+		// 根据server类型选择合适的代理
+		var dialer proxy.Dialer
+		if useFiltered && h.filteredDialer != nil {
+			dialer = h.filteredDialer
+		} else if !useFiltered && h.primaryDialer != nil {
+			dialer = h.primaryDialer
+		}
+
 		client = &dns.Client{
 			UDPSize: h.config.Server.UDPSize,
 			Net:     "udp",
-			Timeout: 2 * time.Second, // 添加超时设置
+			Timeout: 2 * time.Second,
 		}
+
+		// 如果需要使用代理，设置拨号器
+		if dialer != nil {
+			client.Dialer = &net.Dialer{
+				Timeout: 2 * time.Second,
+			}
+			// 为代理创建自定义连接
+			client.Net = "tcp" // SOCKS5代理通常使用TCP
+		}
+
 		h.connPool[server] = client
 		h.poolLock.Unlock()
 	}
@@ -292,7 +377,17 @@ func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server st
 	resultChan := make(chan exchangeResult, 1)
 
 	go func() {
-		msg, rtt, err := client.Exchange(query, server)
+		var msg *dns.Msg
+		var rtt time.Duration
+		var err error
+
+		// 如果需要使用代理，使用代理连接
+		if (useFiltered && h.filteredDialer != nil) || (!useFiltered && h.primaryDialer != nil) {
+			msg, rtt, err = h.exchangeWithProxy(query, server, useFiltered)
+		} else {
+			msg, rtt, err = client.Exchange(query, server)
+		}
+
 		resultChan <- exchangeResult{msg: msg, rtt: rtt, err: err}
 	}()
 
@@ -304,6 +399,7 @@ func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server st
 	}
 }
 
+// getMinTTL 获取DNS响应的最小TTL
 func getMinTTL(msg *dns.Msg) uint32 {
 	if msg == nil || len(msg.Answer) == 0 {
 		return 0
@@ -318,6 +414,7 @@ func getMinTTL(msg *dns.Msg) uint32 {
 	return minTTL
 }
 
+// isCacheExpired 判断DNS缓存是否过期
 func isCacheExpired(msg *dns.Msg) bool {
 	if msg == nil || len(msg.Answer) == 0 {
 		return true
@@ -329,4 +426,49 @@ func isCacheExpired(msg *dns.Msg) bool {
 		}
 	}
 	return false
+}
+
+// exchangeWithProxy 通过SOCKS5代理进行DNS查询
+func (h *Handler) exchangeWithProxy(query *dns.Msg, server string, useFiltered bool) (*dns.Msg, time.Duration, error) {
+	var dialer proxy.Dialer
+	if useFiltered {
+		dialer = h.filteredDialer
+	} else {
+		dialer = h.primaryDialer
+	}
+
+	if dialer == nil {
+		return nil, 0, fmt.Errorf("no proxy dialer available")
+	}
+
+	start := time.Now()
+
+	// 通过代理连接到DNS服务器
+	conn, err := dialer.Dial("tcp", server)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to dial through proxy: %w", err)
+	}
+	defer conn.Close()
+
+	// 设置连接超时
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// 创建DNS连接
+	dnsConn := &dns.Conn{Conn: conn}
+	defer dnsConn.Close()
+
+	// 发送查询
+	err = dnsConn.WriteMsg(query)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to write DNS query: %w", err)
+	}
+
+	// 读取响应
+	response, err := dnsConn.ReadMsg()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read DNS response: %w", err)
+	}
+
+	rtt := time.Since(start)
+	return response, rtt, nil
 }

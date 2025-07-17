@@ -15,10 +15,10 @@ const Version = "1.0.1"
 
 // Config 存储程序配置
 type Config struct {
-	Server ServerConfig `yaml:"server"`
-	DNS    DNSConfig    `yaml:"dns"`
-	Cache  CacheConfig  `yaml:"cache"`
-	Paths  PathsConfig  `yaml:"paths"`
+	Server ServerConfig `yaml:"server"` // 服务相关配置
+	DNS    DNSConfig    `yaml:"dns"`    // DNS相关配置
+	Cache  CacheConfig  `yaml:"cache"`  // 缓存相关配置
+	Paths  PathsConfig  `yaml:"paths"`  // 路径相关配置
 
 	// Runtime fields
 	DomainList      map[string]struct{}
@@ -28,24 +28,26 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port    int    `yaml:"port"`
-	UDPSize uint16 `yaml:"udp_size"`
-	IPV4    bool   `yaml:"ipv4"`
-	IPV6    bool   `yaml:"ipv6"`
+	Port    int    `yaml:"port"`     // 监听端口
+	UDPSize uint16 `yaml:"udp_size"` // UDP包大小
+	IPV4    bool   `yaml:"ipv4"`     // 是否支持IPv4
+	IPV6    bool   `yaml:"ipv6"`     // 是否支持IPv6
 }
 
 type DNSConfig struct {
-	PrimaryServers  []string `yaml:"primary_servers"`
-	FilteredServers []string `yaml:"filtered_servers"`
+	PrimaryServers  []string `yaml:"primary_servers"`         // 主DNS服务器列表
+	FilteredServers []string `yaml:"filtered_servers"`        // 过滤DNS服务器列表
+	PrimaryProxy    string   `yaml:"primary_proxy,omitempty"` // 主DNS代理地址
+	FilterProxy     string   `yaml:"filter_proxy,omitempty"`  // 过滤DNS代理地址
 }
 
 type CacheConfig struct {
-	Limit int `yaml:"limit"`
+	Limit int `yaml:"limit"` // 缓存条目限制
 }
 
 type PathsConfig struct {
-	FilteredServerList string `yaml:"filtered_server_list"`
-	Hosts              string `yaml:"hosts"`
+	FilteredServerList string `yaml:"filtered_server_list"` // 过滤服务器列表路径
+	Hosts              string `yaml:"hosts"`                // hosts文件路径
 }
 
 // LoadFromFile loads configuration from a YAML file
