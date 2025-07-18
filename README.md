@@ -1,6 +1,6 @@
 # EasyDNS
 
-一个用 Go 编写的高性能 DNS 代理服务器，支持基于域名列表的 DNS 分流、缓存、本地 hosts，并支持多种 DNS 协议（UDP、TCP、TLS）和 SOCKS5 代理转发。
+一个用 Go 编写的简易高性能 DNS 代理服务器，支持**基于域名列表的 DNS 分流、缓存、本地 hosts**，并支持多种 DNS 协议（UDP、TCP、TLS）和 SOCKS5 代理转发。
 
 ## 特性
 
@@ -13,26 +13,13 @@
 - 🔗 **IPv4/IPv6 支持**：可配置的 IPv4 和 IPv6 协议支持
 - 📊 **详细日志记录**：完整的查询日志和性能统计
 
-### DNS 服务器格式支持
-
-支持以下多种 DNS 服务器配置格式：
-
-| 格式                | 协议 | 端口 | 说明                           |
-| ------------------- | ---- | ---- | ------------------------------ |
-| `8.8.8.8`           | UDP  | 53   | 最简格式，自动补全默认端口     |
-| `8.8.8.8:53`        | UDP  | 53   | 标准 UDP 格式，指定端口        |
-| `tcp://8.8.8.8`     | TCP  | 53   | TCP 协议，自动补全默认端口     |
-| `tcp://8.8.8.8:53`  | TCP  | 53   | TCP 协议，指定端口             |
-| `tls://8.8.8.8`     | TLS  | 853  | DNS over TLS，自动补全默认端口 |
-| `tls://8.8.8.8:853` | TLS  | 853  | DNS over TLS，指定端口         |
-
-### 分流策略
+### 分流
 
 - 当查询域名匹配 `filtered_server_list` 文件中的记录时，使用 `filtered_servers` 进行解析
 - 其他域名使用 `primary_servers` 进行解析
 - 支持为不同服务器组配置独立的 SOCKS5 代理
 
-## 安装
+## 使用
 
 下载仓库 Releases 中适合的架构二进制文件，运行方法如下：
 
@@ -40,29 +27,11 @@
 easydns -c config.yaml
 ```
 
-`config.yaml` 根据需要自行修改，示例文件位于本仓库的 `config.yaml`。
+`config.yaml` 根据需要自行修改，示例文件位于本仓库的 `.config.yaml`。
 
-## 项目结构
+### 配置说明
 
-```
-├── cmd/easydns/       # 主程序入口
-├── internal/          # 内部包
-│   ├── cache/        # DNS缓存实现
-│   ├── config/       # 配置管理
-│   ├── dns/         # DNS处理器
-│   └── hosts/       # hosts文件解析
-├── pkg/              # 公共包
-│   └── util/        # 工具函数
-└── scripts/          # 辅助脚本
-```
-
-dns:
-
-## 配置说明
-
-配置文件使用 YAML 格式，默认为 `config.yaml`。配置项按功能模块划分：
-
-### 基础配置示例
+配置文件使用 YAML 格式，默认为 `config.yaml`。配置项按功能模块划分，例如：
 
 ```yaml
 server:
@@ -81,47 +50,20 @@ dns:
     - "tls://8.8.8.8" # DNS over TLS，自动补全为 tls://8.8.8.8:853
     - "tls://1.1.1.1:853" # DNS over TLS，指定端口
 
-  # 可选的SOCKS5代理配置
-  primary_proxy: "socks5://192.168.1.1:1080" # 主DNS服务器使用的代理
-  filter_proxy: "socks5://192.168.1.1:1081" # 过滤DNS服务器使用的代理
+  primary_proxy:
+  filter_proxy:
 
 cache:
-  limit: 4096 # DNS缓存最大条目数
+  limit: 4096 # DNS缓存条目数
 
 paths:
-  filtered_server_list: "/path/to/filtered_servers.txt" # 域名过滤列表文件
+  filtered_server_list: "/path/to/filtered_servers.txt"
   hosts: "/etc/hosts" # 系统hosts文件路径
 ```
 
-### DNS 服务器配置详解
+### 网络代理
 
-#### 支持的协议类型
-
-1. **UDP 协议**（默认）
-
-   - `8.8.8.8` → 自动扩展为 `8.8.8.8:53`
-   - `8.8.8.8:53` → 保持原格式
-   - `udp://8.8.8.8` → 显式指定 UDP 协议
-
-2. **TCP 协议**
-
-   - `tcp://8.8.8.8` → 自动扩展为 `tcp://8.8.8.8:53`
-   - `tcp://8.8.8.8:53` → 指定端口的 TCP 格式
-
-3. **TLS 协议**（DNS over TLS / DoT）
-   - `tls://8.8.8.8` → 自动扩展为 `tls://8.8.8.8:853`
-   - `tls://8.8.8.8:853` → 指定端口的 TLS 格式
-   - 提供加密的 DNS 查询，保护隐私和防止篡改
-
-#### 端口自动补全规则
-
-- **UDP/TCP 协议**：未指定端口时自动补全为 `:53`
-- **TLS 协议**：未指定端口时自动补全为 `:853`（RFC 7858 标准端口）
-- **自定义端口**：可以为任何协议指定自定义端口
-
-### SOCKS5 代理配置
-
-支持为不同 DNS 服务器组配置独立的 SOCKS5 代理：
+对于被屏蔽的 dns 服务器，可以为其配置 SOCKS5 代理，例如：
 
 ```yaml
 dns:
@@ -139,12 +81,6 @@ dns:
   filter_proxy: "socks5://proxy2.example.com:1081"
 ```
 
-**代理使用场景：**
-
-- 主 DNS 使用国内代理加速访问
-- 过滤 DNS 使用国际代理突破限制
-- TLS 连接也支持通过代理建立
-
 ## 域名列表格式
 
 域名列表文件（由 `paths.filtered_server_list` 指定）用于控制 DNS 分流，每行一个域名：
@@ -160,24 +96,6 @@ youtube.com
 - 精确匹配：`github.com` 只匹配 `github.com`
 - 子域名不自动匹配：需要单独添加 `api.github.com`
 
-## 使用示例
-
-### 基础使用
-
-```bash
-# 使用默认配置文件
-./easydns
-
-# 指定配置文件
-./easydns -c /path/to/config.yaml
-
-# 查看版本信息
-./easydns -V
-
-# 查看帮助信息
-./easydns -h
-```
-
 ### 配置示例场景
 
 #### 场景 1：国内外 DNS 分流
@@ -191,8 +109,6 @@ dns:
   filtered_servers: # 国外DNS（用于国外域名）
     - "tls://8.8.8.8" # 使用TLS加密
     - "tls://1.1.1.1"
-
-  filter_proxy: "socks5://127.0.0.1:1081" # 国外DNS通过代理访问
 ```
 
 #### 场景 2：隐私优先配置
@@ -220,15 +136,29 @@ dns:
     - "udp://1.1.1.1:53" # 国外UDP，备用
 ```
 
+## 项目结构
+
+```
+├── cmd/easydns/       # 主程序入口
+├── internal/          # 内部包
+│   ├── cache/        # DNS缓存实现
+│   ├── config/       # 配置管理
+│   ├── dns/         # DNS处理器
+│   └── hosts/       # hosts文件解析
+├── pkg/              # 公共包
+│   └── util/        # 工具函数
+└── scripts/          # 辅助脚本
+```
+
 ## 常见问题
 
 ### Q: 如何测试 DNS over TLS 是否工作正常？
 
 ```bash
-# 使用dig测试（需要安装bind-utils）
+# 使用dig测试（Linux/macOS）
 dig @127.0.0.1 +tcp +tls-ca=/etc/ssl/certs/ca-certificates.crt google.com
 
-# 使用nslookup测试
+# 使用nslookup测试（Windows）
 nslookup google.com 127.0.0.1
 ```
 
