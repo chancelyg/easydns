@@ -12,6 +12,9 @@
 - 📋 **本地 hosts 支持**：支持本地 hosts 文件解析
 - 🔗 **IPv4/IPv6 支持**：可配置的 IPv4 和 IPv6 协议支持
 - 📊 **详细日志记录**：完整的查询日志和性能统计
+- 🔄 **HTTPS 域名列表**：支持从 URL 自动下载 GFWList 等域名列表
+- ❤️ **健康检查**：内置 HTTP 健康检查和统计端点
+- ⚡ **优雅关闭**：支持 SIGINT/SIGTERM 信号，平滑终止连接
 
 ### 分流
 
@@ -58,7 +61,14 @@ cache:
   limit: 4096 # DNS缓存条目数
 
 paths:
+  # 方式1: 单个本地文件
   filtered_server_list: "/path/to/filtered_servers.txt"
+
+  # 方式2: 多个数据源，支持本地路径或HTTPS URL（推荐）
+  # 系统会自动下载HTTPS内容、解析域名格式、合并去重
+  filtered_server_lists:
+    - "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
+    - "/path/to/local/domains.txt"
   hosts: "/etc/hosts" # 系统hosts文件路径
 ```
 
@@ -98,13 +108,30 @@ dns:
 
 ## 域名列表格式
 
-域名列表文件（由 `paths.filtered_server_list` 指定）用于控制 DNS 分流，每行一个域名：
+域名列表（由 `paths.filtered_server_list` 或 `paths.filtered_server_lists` 指定）用于控制 DNS 分流，每行一个域名：
 
 ```
 github.com
 google.com
 youtube.com
 ```
+
+### 支持的域名列表格式
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| 纯文本 | `github.com` | 每行一个域名 |
+| Base64 编码 | `Z2l0aHViLmNvbQo=` | GFWList 等使用 Base64 编码，系统自动解码 |
+| AdGuard 格式 | `\|\|github.com^` | 系统自动提取域名部分 |
+| 通配符 | `*.google.com` | 自动去除 `*` 前缀 |
+
+### 使用 HTTPS URL（推荐）
+
+`filtered_server_lists` 支持直接填写 HTTPS URL，系统会自动：
+1. 下载内容
+2. 检测并解码 Base64
+3. 解析各种域名格式
+4. 合并去重
 
 **匹配规则：**
 
@@ -149,6 +176,14 @@ dns:
   filtered_servers:
     - "tls://8.8.8.8" # 国外TLS，隐私保护
     - "udp://1.1.1.1:53" # 国外UDP，备用
+```
+
+#### 场景 4：使用 GFWList 自动分流
+
+```yaml
+paths:
+  filtered_server_lists:
+    - "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
 ```
 
 ## 项目结构
