@@ -8,7 +8,7 @@ dns:
   primary_servers:
     - "223.5.5.5:53"
     - "114.114.114.114:53"
-  filtered_servers: 
+  filtered_servers:
     - "1.1.1.1:53"
     - "8.8.8.8:53"
 
@@ -16,5 +16,12 @@ cache:
   limit: 4096
 
 paths:
-  filtered_server_list: "filtered_servers.txt"
+  # 方式1: 单个本地文件（向后兼容）
+  filtered_server_list: "filtered_server_list.txt"
+
+  # 方式2: 多个数据源，支持本地路径或HTTPS URL
+  # 系统会自动下载HTTPS内容并合并
+  filtered_server_lists:
+    # - "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
+    - "/path/to/local/domains.txt"
   hosts: "/etc/hosts"

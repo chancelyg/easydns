@@ -35,3 +35,8 @@ func (c *DNSCache) Add(key, value interface{}) bool {
 func (c *DNSCache) Remove(key interface{}) {
 	c.cache.Remove(key)
 }
+
+// Len 返回缓存条目数量
+func (c *DNSCache) Len() int {
+	return c.cache.Len()
+}

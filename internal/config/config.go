@@ -2,11 +2,15 @@ package config
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"easydns/internal/cache"
 
@@ -38,10 +42,11 @@ type ServerConfig struct {
 }
 
 type DNSConfig struct {
-	PrimaryServers  []string `yaml:"primary_servers"`         // 主DNS服务器列表
-	FilteredServers []string `yaml:"filtered_servers"`        // 过滤DNS服务器列表
-	PrimaryProxy    string   `yaml:"primary_proxy,omitempty"` // 主DNS代理地址
-	FilterProxy     string   `yaml:"filter_proxy,omitempty"`  // 过滤DNS代理地址
+	PrimaryServers       []string `yaml:"primary_servers"`         // 主DNS服务器列表
+	FilteredServers      []string `yaml:"filtered_servers"`        // 过滤DNS服务器列表
+	PrimaryProxy         string   `yaml:"primary_proxy,omitempty"` // 主DNS代理地址
+	FilterProxy          string   `yaml:"filter_proxy,omitempty"`  // 过滤DNS代理地址
+	MaxConcurrentQueries int      `yaml:"max_concurrent_queries"`  // 最大并发上游查询数
 }
 
 type CacheConfig struct {
@@ -49,8 +54,9 @@ type CacheConfig struct {
 }
 
 type PathsConfig struct {
-	FilteredServerList string `yaml:"filtered_server_list"` // 过滤服务器列表路径
-	Hosts              string `yaml:"hosts"`                // hosts文件路径
+	FilteredServerList  string   `yaml:"filtered_server_list"`  // 过滤服务器列表路径（单个本地文件）
+	FilteredServerLists []string `yaml:"filtered_server_lists"` // 过滤服务器列表源（支持本地路径或HTTPS URL）
+	Hosts               string   `yaml:"hosts"`                 // hosts文件路径
 }
 
 // LoadFromFile loads configuration from a YAML file
@@ -71,6 +77,9 @@ func LoadFromFile(filename string) (*Config, error) {
 	}
 	if len(cfg.DNS.FilteredServers) == 0 {
 		cfg.DNS.FilteredServers = []string{"8.8.8.8:53"}
+	}
+	if cfg.DNS.MaxConcurrentQueries == 0 {
+		cfg.DNS.MaxConcurrentQueries = 50 // 默认最大50个并发查询
 	}
 
 	// 验证和标准化DNS服务器格式
@@ -110,16 +119,114 @@ func (c *Config) Initialize() error {
 		return err
 	}
 
-	c.DomainList = loadDomainFile(c.Paths.FilteredServerList)
+	c.DomainList = c.loadDomainList()
 	c.HostsMap = parseHostsFile(c.Paths.Hosts)
 	return nil
+}
+
+// loadDomainList 加载域名列表，支持多个源（本地文件或HTTPS URL）
+func (c *Config) loadDomainList() map[string]struct{} {
+	domainList := make(map[string]struct{})
+
+	// 优先使用新的多源配置
+	if len(c.Paths.FilteredServerLists) > 0 {
+		for _, source := range c.Paths.FilteredServerLists {
+			domains := c.loadDomainFromSource(source)
+			for domain := range domains {
+				domainList[domain] = struct{}{}
+			}
+		}
+		return domainList
+	}
+
+	// 兼容旧的单文件配置
+	if c.Paths.FilteredServerList != "" {
+		domains := c.loadDomainFromSource(c.Paths.FilteredServerList)
+		for domain := range domains {
+			domainList[domain] = struct{}{}
+		}
+	}
+
+	return domainList
+}
+
+// loadDomainFromSource 从单个源加载域名（支持本地路径或HTTPS URL）
+func (c *Config) loadDomainFromSource(source string) map[string]struct{} {
+	if strings.HasPrefix(source, "https://") || strings.HasPrefix(source, "http://") {
+		return c.loadDomainFromURL(source)
+	}
+	return loadDomainFile(source)
+}
+
+// loadDomainFromURL 从HTTPS URL下载并解析域名列表
+func (c *Config) loadDomainFromURL(url string) map[string]struct{} {
+	domainList := make(map[string]struct{})
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"url": url, "error": err}).Warn("Failed to download domain list from URL")
+		return domainList
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logrus.WithFields(logrus.Fields{"url": url, "status": resp.StatusCode}).Warn("Failed to download domain list: non-200 status")
+		return domainList
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"url": url, "error": err}).Warn("Failed to read domain list body")
+		return domainList
+	}
+
+	content := string(body)
+
+	// 检测是否为 base64 编码（GFWList 格式）
+	decoded, err := base64.StdEncoding.DecodeString(content)
+	if err == nil && len(decoded) < len(content) {
+		content = string(decoded)
+	}
+
+	// 解析域名列表（每行一个域名，# 开头为注释）
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// 跳过空行和注释
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
+			continue
+		}
+		// 跳过 GFWList 的特殊标记
+		if strings.HasPrefix(line, "[") || strings.HasPrefix(line, "||") || strings.HasPrefix(line, ".") {
+			continue
+		}
+		// 处理 ||domain.com 格式（AdGuard 格式）
+		if strings.HasPrefix(line, "||") {
+			line = strings.TrimPrefix(line, "||")
+			line = strings.Split(line, "^")[0]
+		}
+		// 处理 domain.com^ 格式
+		line = strings.Split(line, "^")[0]
+		// 处理 *  通配符
+		line = strings.Trim(line, "*")
+		if line != "" && c.isValidDomainName(line) {
+			domainList[line] = struct{}{}
+		}
+	}
+
+	logrus.WithFields(logrus.Fields{"url": url, "count": len(domainList)}).Info("Downloaded domain list from URL")
+	return domainList
 }
 
 func loadDomainFile(filename string) map[string]struct{} {
 	domainList := make(map[string]struct{})
 	file, err := os.Open(filename)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{"err": err, "filename": filename}).Fatal("Failed to open file")
+		logrus.WithFields(logrus.Fields{"err": err, "filename": filename}).Warn("Failed to open domain list file, continuing without it")
 		return domainList
 	}
 	defer file.Close()
@@ -130,7 +237,7 @@ func loadDomainFile(filename string) map[string]struct{} {
 	}
 
 	if err := scanner.Err(); err != nil {
-		logrus.WithFields(logrus.Fields{"err": err, "filename": filename}).Fatal("Error reading domain list file")
+		logrus.WithFields(logrus.Fields{"err": err, "filename": filename}).Warn("Error reading domain list file, continuing with loaded entries")
 	}
 
 	return domainList
@@ -140,7 +247,7 @@ func parseHostsFile(filePath string) map[string][]string {
 	hosts := make(map[string][]string)
 	file, err := os.Open(filePath)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{"err": err, "filePath": filePath}).Error("can't open file")
+		logrus.WithFields(logrus.Fields{"err": err, "filePath": filePath}).Warn("Failed to open hosts file, continuing without it")
 		return hosts
 	}
 	defer file.Close()
@@ -162,7 +269,7 @@ func parseHostsFile(filePath string) map[string][]string {
 	}
 
 	if err := scanner.Err(); err != nil {
-		logrus.WithFields(logrus.Fields{"err": err, "filePath": filePath}).Error("can't load file")
+		logrus.WithFields(logrus.Fields{"err": err, "filePath": filePath}).Warn("Error reading hosts file, continuing with loaded entries")
 	}
 
 	return hosts
@@ -300,18 +407,25 @@ func (c *Config) parseDNSServer(server string) (string, error) {
 // 返回值：
 //   - bool: 域名格式有效返回true，否则返回false
 func (c *Config) isValidDomainName(domain string) bool {
-	// RFC 1035规定域名最大长度为253字符
 	if len(domain) == 0 || len(domain) > 253 {
 		return false
 	}
 
-	// 验证字符集：仅允许字母、数字、点号和连字符
-	for _, char := range domain {
-		if !((char >= 'a' && char <= 'z') ||
-			(char >= 'A' && char <= 'Z') ||
-			(char >= '0' && char <= '9') ||
-			char == '.' || char == '-') {
+	labels := strings.Split(domain, ".")
+	for _, label := range labels {
+		if len(label) == 0 {
 			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			if !((char >= 'a' && char <= 'z') ||
+				(char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') ||
+				char == '-') {
+				return false
+			}
 		}
 	}
 

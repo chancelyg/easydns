@@ -20,18 +20,20 @@ import (
 
 // Handler DNS请求处理器，负责转发和缓存DNS查询
 type Handler struct {
-	config         *config.Config         // 全局配置
-	connPool       map[string]*dns.Client // DNS客户端连接池
-	poolLock       sync.RWMutex           // 连接池锁
-	primaryDialer  proxy.Dialer           // 主DNS SOCKS5代理拨号器
-	filteredDialer proxy.Dialer           // 过滤DNS SOCKS5代理拨号器
+	config         *config.Config // 全局配置
+	connPool       sync.Map       // DNS客户端连接池 (map[string]*dns.Client)
+	querySemaphore chan struct{}  // 并发查询信号量
+	evictionTimers sync.Map       // 缓存删除定时器跟踪 (key -> *time.Timer)
+	evictionLock   sync.Mutex     // 定时器映射操作锁
+	primaryDialer  proxy.Dialer   // 主DNS SOCKS5代理拨号器
+	filteredDialer proxy.Dialer   // 过滤DNS SOCKS5代理拨号器
 }
 
 // NewHandler 创建DNS请求处理器
 func NewHandler(cfg *config.Config) *Handler {
 	h := &Handler{
-		config:   cfg,
-		connPool: make(map[string]*dns.Client),
+		config:         cfg,
+		querySemaphore: make(chan struct{}, cfg.DNS.MaxConcurrentQueries),
 	}
 
 	// 初始化SOCKS5代理客户端
@@ -124,6 +126,7 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	var cache interface {
 		Get(interface{}) (interface{}, bool)
 		Add(interface{}, interface{}) bool
+		Remove(interface{})
 	}
 	const (
 		minCacheDuration = 60 * time.Second // 最小缓存时间1分钟
@@ -195,13 +198,21 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		go func(srv string) {
 			defer wg.Done()
 
+			// 获取信号量，限制并发数
+			select {
+			case h.querySemaphore <- struct{}{}:
+				defer func() { <-h.querySemaphore }()
+			case <-ctx.Done():
+				return
+			}
+
 			response, err := h.forwardDNSQuery(ctx, r, srv, useFiltered)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"server": srv,
 					"error":  err,
 					"domain": requestedDomain,
-				}).Debug("DNS query failed")
+				}).Warn("DNS query failed")
 				return
 			}
 
@@ -285,15 +296,11 @@ func (h *Handler) HandleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 		cacheDuration = maxTTL
 	}
 
-	time.AfterFunc(cacheDuration, func() {
-		if c, ok := cache.(interface{ Remove(interface{}) }); ok {
-			c.Remove(cacheID)
-		}
-	})
-
 	ips := util.ExtractIPAddresses(bestResponse)
 	if len(ips) > 0 {
 		cache.Add(cacheID, bestResponse)
+		// 先添加缓存，再调度删除，避免竞态条件
+		h.scheduleCacheEviction(cache, cacheID, cacheDuration)
 	}
 	w.WriteMsg(bestResponse)
 }
@@ -340,16 +347,13 @@ func (h *Handler) forwardDNSQuery(ctx context.Context, query *dns.Msg, server st
 		return nil, fmt.Errorf("failed to parse server %s: %w", server, err)
 	}
 
-	// 获取或创建客户端
-	h.poolLock.RLock()
-	client, exists := h.connPool[server]
-	h.poolLock.RUnlock()
-
-	if !exists {
-		h.poolLock.Lock()
+	// 获取或创建客户端 (使用 sync.Map 实现并发安全)
+	var client *dns.Client
+	if c, exists := h.connPool.Load(server); exists {
+		client = c.(*dns.Client)
+	} else {
 		client = h.createDNSClient(serverInfo, useFiltered)
-		h.connPool[server] = client
-		h.poolLock.Unlock()
+		h.connPool.Store(server, client)
 	}
 
 	// 使用上下文控制超时
@@ -597,4 +601,45 @@ func (h *Handler) exchangeWithProxy(query *dns.Msg, server string, useFiltered b
 
 	rtt := time.Since(start)
 	return response, rtt, nil
+}
+
+// scheduleCacheEviction 调度缓存条目在指定时间后删除
+func (h *Handler) scheduleCacheEviction(cache interface{ Remove(interface{}) }, cacheID string, delay time.Duration) {
+	h.evictionLock.Lock()
+	defer h.evictionLock.Unlock()
+
+	// 取消已存在的同名定时器（如果存在）
+	if existing, ok := h.evictionTimers.Load(cacheID); ok {
+		if t, ok := existing.(*time.Timer); ok {
+			t.Stop()
+		}
+	}
+
+	// 创建新的定时器
+	timer := time.AfterFunc(delay, func() {
+		h.evictionLock.Lock()
+		h.evictionTimers.Delete(cacheID)
+		h.evictionLock.Unlock()
+
+		if c, ok := cache.(interface{ Remove(interface{}) }); ok {
+			c.Remove(cacheID)
+			logrus.WithFields(logrus.Fields{"cacheID": cacheID}).Debug("cache evicted via timer")
+		}
+	})
+
+	h.evictionTimers.Store(cacheID, timer)
+}
+
+// Stop 停止所有定时器，用于优雅关闭
+func (h *Handler) Stop() {
+	h.evictionLock.Lock()
+	defer h.evictionLock.Unlock()
+
+	h.evictionTimers.Range(func(key, value interface{}) bool {
+		if t, ok := value.(*time.Timer); ok {
+			t.Stop()
+		}
+		h.evictionTimers.Delete(key)
+		return true
+	})
 }

@@ -50,8 +50,9 @@ dns:
     - "tls://8.8.8.8" # DNS over TLS，自动补全为 tls://8.8.8.8:853
     - "tls://1.1.1.1:853" # DNS over TLS，指定端口
 
-  primary_proxy:
-  filter_proxy:
+  primary_proxy: "socks5://proxy1.example.com:1080" # 主DNS SOCKS5代理（可选）
+  filter_proxy: "socks5://proxy2.example.com:1081" # 过滤DNS SOCKS5代理（可选）
+  max_concurrent_queries: 50 # 最大并发上游查询数（默认50）
 
 cache:
   limit: 4096 # DNS缓存条目数
@@ -59,6 +60,20 @@ cache:
 paths:
   filtered_server_list: "/path/to/filtered_servers.txt"
   hosts: "/etc/hosts" # 系统hosts文件路径
+```
+
+### 健康检查
+
+服务提供 HTTP 健康检查端点：
+
+```bash
+# 健康检查端点（端口 = DNS端口 + 10000）
+curl http://localhost:15353/health
+# 返回: OK
+
+# 统计信息端点
+curl http://localhost:15353/stats
+# 返回: {"primary_servers":2,"filtered_servers":2,"cache_primary_size":10,"cache_minor_size":5}
 ```
 
 ### 网络代理
@@ -141,13 +156,96 @@ dns:
 ```
 ├── cmd/easydns/       # 主程序入口
 ├── internal/          # 内部包
-│   ├── cache/        # DNS缓存实现
-│   ├── config/       # 配置管理
-│   ├── dns/         # DNS处理器
-│   └── hosts/       # hosts文件解析
+│   ├── cache/        # DNS缓存实现 (LRU)
+│   ├── config/       # 配置管理、域名列表、hosts解析
+│   └── dns/         # DNS请求处理、转发、协议实现
 ├── pkg/              # 公共包
-│   └── util/        # 工具函数
+│   └── util/        # 工具函数 (IP提取、域名提取)
 └── scripts/          # 辅助脚本
+```
+
+## 架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         DNS 请求流程                                      │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  Client DNS Query (UDP/TCP)
+           │
+           ▼
+  ┌─────────────────┐
+  │ IPv4/IPv6 过滤  │ ──► 如果禁用，返回 NotImplemented
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │  检查 Hosts 文件  │ ──► 命中则返回本地解析结果
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │    检查缓存      │ ──► 命中且未过期则返回缓存结果
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────────────────────────────┐
+  │       域名匹配 & 上游选择                 │
+  │  • filtered_server_list 命中 ──► filtered_servers + CacheMinorDNS  │
+  │  • 其他 ────────────────────► primary_servers + CachePrimaryDNS   │
+  └────────┬────────────────────────────────┘
+           │
+           ▼
+  ┌─────────────────────────────────────────┐
+  │        并发查询所有上游服务器              │
+  │  • UDP/TCP 直连                         │
+  │  • DNS-over-TLS (DoT)                   │
+  │  • SOCKS5 代理转发                       │
+  │  • 3秒超时控制                           │
+  └────────┬────────────────────────────────┘
+           │
+           ▼
+  ┌─────────────────────────────────────────┐
+  │         返回最快有效响应                  │
+  │  • 优先返回有结果的响应                  │
+  │  • IPv4 响应优先（减少延迟）             │
+  │  • 缓存结果并返回给客户端               │
+  └─────────────────────────────────────────┘
+```
+
+## 构建与测试
+
+### 构建
+```bash
+# 编译
+go build -o easydns ./cmd/easydns
+
+# 运行
+go run ./cmd/easydns -c config.yaml
+
+# 格式化代码
+gofmt -w .
+
+# 代码检查
+go vet ./...
+```
+
+### 测试
+```bash
+# 运行所有测试
+go test ./...
+
+# 运行测试（详细输出）
+go test -v ./...
+
+# 运行单个包的测试
+go test -v ./internal/dns
+
+# 运行单个测试函数
+go test -v -run TestFunctionName ./internal/dns
+
+# 测试覆盖率
+go test -cover ./...
 ```
 
 ## 常见问题
@@ -185,6 +283,13 @@ nslookup google.com 127.0.0.1
 3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
 4. 推送到分支 (`git push origin feature/AmazingFeature`)
 5. 开启 Pull Request
+
+### 代码规范
+
+- 提交前运行 `gofmt -w .` 格式化代码
+- 提交前运行 `go vet ./...` 检查代码问题
+- 新功能需附带单元测试
+- 保持代码简洁，避免不必要的复杂度
 
 ## 许可证
 

@@ -7,6 +7,9 @@ import (
 )
 
 func ExtractIPAddresses(msg *dns.Msg) []string {
+	if msg == nil || msg.Answer == nil {
+		return nil
+	}
 	var ips []string
 	for _, ans := range msg.Answer {
 		switch record := ans.(type) {
